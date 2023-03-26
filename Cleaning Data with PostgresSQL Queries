@@ -1,133 +1,148 @@
-/*
-Cleaning Data with PosGresSQL Queries
-*/
+-- Covid 19 Data Exploration
+--Skills used: Joins, CTE's, Temp Tables, Windows Functions, Aggregate Functions, Creating Views, Converting Data Types
 
--- Let's see everthing
-Select * From nashville_housing_data;
-
---------------------------------------------------------------------------------------------------------------------------
-
-/* Populate Property Address data */
-
+-- Lets view all the data we have.
 Select * 
-From nashville_housing_data
-Order By parcelid;
--- Joins two tables on the condition that their "parcelid" 
---columns match. 
+From coviddeaths
+Order By location, date;
 
-Select * 
-From nashville_housing_data a
-Join nashville_housing_data b 
-	on a.parcelid = b.parcelid
-	And a.uniqueid <> b.uniqueid
-Where a.propertyaddress Is null;
--- Joins the list where on the condition that their
---"parcelid" columns match and where "propertyaddress" 
---is null so you can fill the the null values.
-Select a.parcelid, a.propertyaddress, b.parcelid, b.propertyaddress 
-From nashville_housing_data a
-Join nashville_housing_data b 
-	on a.parcelid = b.parcelid
-	And a.uniqueid <> b.uniqueid
-Where a.propertyaddress Is null;
--- Updates all rows where propertyaddress has a null value,
--- because it has taken the value from the corresponding 
--- parcelid code.
-UPDATE nashville_housing_data AS a
-SET propertyaddress = b.propertyaddress
-FROM nashville_housing_data AS b
-WHERE a.parcelid = b.parcelid
-  AND a.uniqueid <> b.uniqueid
-  AND a.propertyaddress IS NULL;
--- When reading this syntax it's best to understand the 
--- Where clause first, then undertand what the Set clause
--- is stating. This doesn't use a join statement 
--- but the Where clause implies it.
---------------------------------------------------------------------------------------------------------------------------
+-- Select Data that we are going to be starting with.
+Select location, date, total_cases, new_cases, total_deaths, population 
+From coviddeaths
+Where location = 'United States'
+Order By location, date;
 
-/* Change true and false to Yes and No in "Sold as Vacant" field */
+-- Total Cases vs Total Deaths
+-- Shows likelihood of dying if you contract covid in your country.
+SELECT location, date, total_cases, total_deaths, 
+       ROUND(
+           CASE 
+              WHEN total_cases = 0 THEN NULL 
+              ELSE (total_deaths::numeric / NULLIF(total_cases, 0)) * 100
+           END, 2) AS DeathPercentage
+FROM coviddeaths
+Where location = 'United States'
+ORDER BY location, date;
 
---See that column and rows + how many of them are true/false
-Select Distinct(Soldasvacant), Count(Soldasvacant) 
-From nashville_housing_data
-Group By Soldasvacant
-Order By Soldasvacant;
--- Create the change througha Case statement
-SELECT soldasvacant, 
-  CASE 
-    WHEN soldasvacant = 'true' THEN 'Yes'
-    WHEN soldasvacant = 'false' THEN 'No'
-    ELSE soldasvacant
-  END AS soldasvacant_str
-FROM nashville_housing_data;
---Update that column's rows
-Update nashville_housing_data
-Set soldasvacant = 
-CASE 
-    WHEN soldasvacant = 'true' THEN 'Yes'
-    WHEN soldasvacant = 'false' THEN 'No'
-    ELSE soldasvacant
-  END;
--- Recheck that column 
-Select soldasvacant
-From nashville_housing_data;
+--Total Cases vs Population
+-- Shows what percentage of population infected with Covid.
+SELECT location, date, total_cases, population, 
+       ROUND(
+           CASE 
+              WHEN total_cases = 0 THEN NULL 
+              ELSE (total_deaths::numeric / NULLIF(population, 0)) * 100
+           END, 2) AS PercentPopulationInfected
+FROM coviddeaths
+Where location = 'United States'
+ORDER BY location, date;
 
------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- Countries with Highest Infection Rate compared to Population
+SELECT location, 
+       population, 
+       Max(total_cases) as HighestInfectionCount,  
+       CASE 
+          WHEN Max(total_cases) = 0 OR population = 0 THEN NULL 
+          ELSE (Max(total_cases)::numeric / population) * 100
+       END AS PercentPopulationInfected
+FROM coviddeaths
+GROUP BY location, population
+ORDER BY PercentPopulationInfected DESC NULLS LAST;
 
-/* Remove Duplicates */
+--Countries with Highest Death Count per Population
+SELECT location, Max(total_deaths)::numeric As TotalDeathCount  
+FROM coviddeaths
+--The where statment has to include both 'Other' and '0' value
+WHERE continent IS NOT NULL AND continent <> 'Other' 
+AND continent <> '0'
+GROUP BY location
+ORDER BY TotalDeathCount DESC;
 
--- We have to identify pure duplicates and then delete them.
--- Temporary table holding the pure duplicates.
-With Duplicates As (
-  Select parcelid, propertyaddress, saledate, legalreference, COUNT(*) As cnt
-  From nashville_housing_data
-  Group By parcelid, propertyaddress, saledate, legalreference
-  Having COUNT(*) > 1
+-- BREAKING THINGS DOWN BY CONTINENT
+-- Showing contintents with the highest death count per population
+SELECT continent, Max(total_deaths)::numeric As TotalDeathCount  
+FROM coviddeaths
+--The where statment has to include both 'Other' and '0' value
+WHERE continent IS NOT NULL AND continent <> 'Other' 
+AND continent <> '0'
+GROUP BY continent
+ORDER BY TotalDeathCount DESC;
+
+-- GLOBAL NUMBERS
+SELECT location, Max(total_deaths)::numeric As TotalDeathCount
+FROM coviddeaths
+WHERE (continent = 'Other' OR continent = '0')
+   And location <> 'High income'
+   And location <> 'Upper middle income'
+   And location <> 'Lower middle income'
+   And location <> 'Low income'
+GROUP BY location
+ORDER BY TotalDeathCount DESC;
+
+-- Total Population vs Vaccinations
+-- Shows Percentage of Population that has recieved at least one Covid Vaccine
+WITH vaccination_totals AS (
+  SELECT cd.continent, cd.location, cd.date, cd.population, v.new_vaccinations,
+    SUM(v.new_vaccinations) OVER (PARTITION BY cd.location ORDER BY cd.location, cd.date) AS RollingPeopleVaccinated
+  FROM coviddeaths cd
+  FULL OUTER JOIN vaccinations v ON cd.location = v.location AND cd.date = v.date
+  WHERE (cd.continent IS NULL OR cd.continent NOT IN ('Other', '0'))
+    AND cd.location NOT IN ('High income', 'Upper middle income', 'Lower middle income', 'Low income')
 )
--- Joining the temp table with the actual table.
-Select n.*
-From nashville_housing_data n
-Join Duplicates d
-On n.parcelid = d.parcelid
-And n.propertyaddress = d.propertyaddress
-And n.saledate = d.saledate
-And n.legalreference = d.legalreference
-Order By n.propertyaddress;
+SELECT *, (RollingPeopleVaccinated/population) * 100 AS PercentagePeopleVaccinated
+FROM vaccination_totals
+WHERE new_vaccinations IS NOT NULL AND RollingPeopleVaccinated IS NOT NULL
+ORDER BY location, date;
 
---This creates a temporary table called "Duplicates" 
---that contains information about the rows that have 
---duplicates. Then uses the "DELETE" statement to delete 
---the duplicates from the nashville_housing_data table 
-WITH Duplicates AS (
-  SELECT parcelid, propertyaddress, saledate, legalreference, COUNT(*) AS cnt
-  FROM nashville_housing_data
-  GROUP BY parcelid, propertyaddress, saledate, legalreference
-  HAVING COUNT(*) > 1
-)
-DELETE FROM nashville_housing_data
-WHERE (parcelid, propertyaddress, saledate, legalreference) IN (
-  SELECT parcelid, propertyaddress, saledate, legalreference
-  FROM Duplicates
+-- Using Temp Table to perform Calculation on Partition By in previous query
+CREATE TABLE vaccination_totals_table (
+  continent TEXT,
+  location TEXT,
+  date DATE,
+  population NUMERIC,
+  new_vaccinations NUMERIC,
+  rolling_people_vaccinated NUMERIC,
+  percentage_people_vaccinated NUMERIC
 );
--- Re-check for Duplicates 
-With Duplicates As (
-  Select parcelid, propertyaddress, saledate, legalreference, COUNT(*) As cnt
-  From nashville_housing_data
-  Group By parcelid, propertyaddress, saledate, legalreference
-  Having COUNT(*) > 1
+
+INSERT INTO vaccination_totals_table
+WITH vaccination_totals AS (
+  SELECT cd.continent, cd.location, cd.date, cd.population, v.new_vaccinations,
+    SUM(v.new_vaccinations) OVER (PARTITION BY cd.location ORDER BY cd.location, cd.date) AS rolling_people_vaccinated
+  FROM coviddeaths cd
+  FULL OUTER JOIN vaccinations v ON cd.location = v.location AND cd.date = v.date
+  WHERE (cd.continent IS NULL OR cd.continent NOT IN ('Other', '0'))
+    AND cd.location NOT IN ('High income', 'Upper middle income', 'Lower middle income', 'Low income')
 )
--- Joining the temp table with the actual table.
-Select n.*
-From nashville_housing_data n
-Join Duplicates d
-On n.parcelid = d.parcelid
-And n.propertyaddress = d.propertyaddress
-And n.saledate = d.saledate
-And n.legalreference = d.legalreference
-Order By n.propertyaddress;
+SELECT 
+  continent, 
+  location, 
+  date, 
+  population, 
+  new_vaccinations, 
+  rolling_people_vaccinated, 
+  (rolling_people_vaccinated/population) * 100 AS percentage_people_vaccinated
+FROM vaccination_totals
+WHERE new_vaccinations IS NOT NULL AND rolling_people_vaccinated IS NOT NULL
+ORDER BY location, date;
+
+-- Creating View to store data for later visualizations
+
+Create View PercentagePeopleVaccinated As
+WITH vaccination_totals AS (
+  SELECT cd.continent, cd.location, cd.date, cd.population, v.new_vaccinations,
+    SUM(v.new_vaccinations) OVER (PARTITION BY cd.location ORDER BY cd.location, cd.date) AS RollingPeopleVaccinated
+  FROM coviddeaths cd
+  FULL OUTER JOIN vaccinations v ON cd.location = v.location AND cd.date = v.date
+  WHERE (cd.continent IS NULL OR cd.continent NOT IN ('Other', '0'))
+    AND cd.location NOT IN ('High income', 'Upper middle income', 'Lower middle income', 'Low income')
+)
+SELECT *, (RollingPeopleVaccinated/population) * 100 AS PercentagePeopleVaccinated
+FROM vaccination_totals
+WHERE new_vaccinations IS NOT NULL AND RollingPeopleVaccinated IS NOT NULL
+ORDER BY location, date;
 
 
-Select * From nashville_housing_data
+
 
 
 
